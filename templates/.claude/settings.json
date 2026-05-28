@@ -1,0 +1,95 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Glob(**)",
+      "Grep(**)",
+      "Edit(src/**)",
+      "Edit(tests/**)",
+      "Edit(public/**)",
+      "Edit(*.json)",
+      "Edit(*.md)",
+      "Edit(*.ts)",
+      "Edit(*.tsx)",
+      "Edit(*.js)",
+      "Edit(*.jsx)",
+      "Edit(*.css)",
+      "Edit(.claude/**)",
+      "Write(src/**)",
+      "Write(tests/**)",
+      "Write(public/**)",
+      "Write(.claude/handoffs/**)",
+      "Bash(node tasks/cli.js:*)",
+      "Bash(npm test:*)",
+      "Bash(npm run test:*)",
+      "Bash(npm run lint:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(npm run build)",
+      "Bash(npm run dev)",
+      "Bash(npx lighthouse:*)",
+      "Bash(npx @axe-core/cli:*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(**/.aws/**)",
+      "Read(**/.ssh/**)",
+      "Read(**/secrets/**)",
+      "Read(**/credentials/**)",
+      "Bash(npm install:*)",
+      "Bash(npm i:*)",
+      "Bash(yarn add:*)",
+      "Bash(yarn install:*)",
+      "Bash(pnpm add:*)",
+      "Bash(pnpm install:*)",
+      "Bash(npx -y *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(rm -rf *)",
+      "Bash(git push *)",
+      "Bash(git push --force *)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node tasks/cli.js stats"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx --no-install eslint --fix \"$CLAUDE_FILE_PATHS\" 2>&1 | tail -20 || true"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "case \"$CLAUDE_FILE_PATHS\" in *package.json) npm audit --audit-level=high 2>&1 | tail -10 || true ;; esac"
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "ENABLE_TOOL_SEARCH": "true"
+  }
+}

@@ -19,8 +19,8 @@ Instead of asking Claude to "just build X," you:
 1. Add a task to the database
 2. Tell Claude "work on task 1"
 3. The orchestrator spawns a developer subagent (isolated context)
-4. The orchestrator spawns 3 review subagents in parallel (QA + Security + PM)
-5. The task-manager subagent evaluates reviews and decides PASS/FAIL
+4. The orchestrator spawns a reviewer subagent (covers QA + security + scope in one pass)
+5. The orchestrator evaluates the review and decides PASS/FAIL
 6. If FAIL, the system automatically creates fix tasks and loops Steps 3-5 until PASS
 
 **Result:** Higher quality code, better separation of concerns, full audit trail, and the ability to work on multiple tasks in parallel.
@@ -46,7 +46,7 @@ When you say **"work on task 1"**, the orchestrator executes this loop:
 - The **orchestrator (Claude in main context)** coordinates workflow but NEVER writes code or reviews
 - **All implementation and review work is done by subagents** (spawned via the Task tool)
 - Each subagent operates in an **isolated context** with its own instructions from `.claude/agents/*.md`
-- The **task-manager subagent** manages the database and makes PASS/FAIL decisions
+- The **orchestrator** manages the database (via `tasks/cli.js`) and makes PASS/FAIL decisions
 - The system **loops automatically** on failures until quality gates pass
 
 ---
@@ -106,8 +106,8 @@ work on task 1
 Claude will:
 1. Fetch and claim the task
 2. Spawn a developer subagent to implement it
-3. Spawn 3 review subagents in parallel (QA, Security, PM)
-4. Spawn task-manager to evaluate reviews
+3. Spawn a reviewer subagent (covers QA + security + scope)
+4. Evaluate the review report
 5. Loop on failures or complete on success
 6. Suggest the next task
 
@@ -122,10 +122,8 @@ your-project/
 ├── .claude/
 │   ├── agents/
 │   │   ├── developer.md          # Developer subagent instructions
-│   │   ├── qa-reviewer.md        # QA review checklist
-│   │   ├── security-ops.md       # Security review checklist
-│   │   ├── project-manager.md    # Requirements review checklist
-│   │   ├── task-manager.md       # Task DB management + decision logic
+│   │   ├── reviewer.md           # Reviewer (QA + security + scope in one pass)
+│   │   ├── decomposer.md         # Breaks goals into tasks
 │   │   └── researcher.md         # Technical research agent
 │   ├── context/
 │   │   ├── project-overview.md   # (Template — fill this in)
@@ -152,10 +150,8 @@ The workflow uses 6 specialized subagent roles:
 | Agent | File | Role |
 |-------|------|------|
 | **Developer** | `.claude/agents/developer.md` | Reads context, implements tasks, runs tests, reports results |
-| **QA Reviewer** | `.claude/agents/qa-reviewer.md` | Reviews code quality, tests, accessibility, performance |
-| **Security Ops** | `.claude/agents/security-ops.md` | Reviews API safety, input validation, auth, secret handling |
-| **Project Manager** | `.claude/agents/project-manager.md` | Reviews requirements alignment, UX, completeness |
-| **Task Manager** | `.claude/agents/task-manager.md` | Evaluates reviews, updates DB, creates fix/follow-up tasks |
+| **Reviewer** | `.claude/agents/reviewer.md` | Reviews QA (quality/tests/a11y/perf) + security (API/auth/inputs) + scope (requirements/UX) in a single pass |
+| **Decomposer** | `.claude/agents/decomposer.md` | Breaks a goal/spec into a structured set of tasks with priorities and dependencies |
 | **Researcher** | `.claude/agents/researcher.md` | Performs technical research before complex tasks |
 
 Each agent is **spawned via the Task tool** with `subagent_type: "general-purpose"` and a prompt that instructs it to read its `.md` file and follow the instructions exactly.
@@ -189,7 +185,7 @@ node tasks/cli.js add \
 # Claim a task (auto-infers model + reviews + context)
 node tasks/cli.js claim 1 --agent developer
 
-# Complete a task (usually done by task-manager subagent)
+# Complete a task (orchestrator calls this after a passing review)
 node tasks/cli.js complete 1 --summary "Hero section implemented and tested"
 
 # View statistics
@@ -235,9 +231,9 @@ When you **claim a task**, the CLI automatically infers:
 
 | Task Type | Model | Rationale |
 |-----------|-------|-----------|
-| Priority: LOW + Category: Fix | `claude-haiku-4-5` | Simple bug fixes → fast model |
-| Priority: TRIVIAL | `claude-haiku-4-5` | Trivial tasks → fast model |
-| Priority: CRITICAL or 5+ files affected | `claude-opus-4-6` | Complex architecture → most capable model |
+| Priority: LOW + Category: Fix | `claude-haiku-4-5-20251001` | Simple bug fixes → fast model |
+| Priority: TRIVIAL | `claude-haiku-4-5-20251001` | Trivial tasks → fast model |
+| Priority: CRITICAL or 5+ files affected | `claude-opus-4-7` | Complex architecture → most capable model |
 | Everything else | `claude-sonnet-4-6` | Standard work → balanced model |
 
 ### 2. Review Dimensions (Additive)
@@ -279,10 +275,10 @@ These are loaded by subagents to understand your project.
 
 ### 2. Agent Checklists
 
-Edit `.claude/agents/*.md` to adjust review criteria:
-- **qa-reviewer.md** — Add project-specific test requirements
-- **security-ops.md** — Add custom security rules (e.g., HIPAA compliance)
-- **project-manager.md** — Add brand voice guidelines
+Edit `.claude/agents/reviewer.md` to adjust review criteria. The reviewer covers three dimensions in one pass — add project-specific items under each:
+- **QA Review** — project-specific test requirements
+- **Security Review** — custom security rules (e.g., HIPAA compliance)
+- **Requirements Review** — brand voice guidelines, scope rules
 
 ### 3. Task Database Schema
 
@@ -303,11 +299,11 @@ work on task 5 and 6
 The orchestrator will:
 1. **Get + Claim** both tasks in parallel (2 bash calls)
 2. **Spawn 2 developer subagents** in parallel (1 message, 2 Task calls)
-3. **Spawn 6 review subagents** in parallel (1 message, 6 Task calls — 3 per task)
-4. **Spawn 2 task-manager subagents** in parallel (1 message, 2 Task calls)
+3. **Spawn 2 reviewer subagents** in parallel (1 message, 2 Task calls)
+4. **Orchestrator evaluates each review** sequentially (no subagent needed)
 5. **Handle results independently:**
    - Task 5 passes → done
-   - Task 6 fails → loop only task 6 (developer fix → re-review → task-manager)
+   - Task 6 fails → loop only task 6 (developer fix → re-review)
 
 **Rules:**
 - Same step across all tasks → single message with parallel tool calls

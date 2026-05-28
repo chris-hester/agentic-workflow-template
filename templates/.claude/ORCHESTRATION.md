@@ -98,8 +98,6 @@ Task(
 )
 ```
 
-**For CRITICAL priority tasks**, you MAY spawn 3 separate reviewers in parallel (qa-reviewer.md, security-ops.md, project-manager.md).
-
 **After reviewer returns**, save the report:
 ```bash
 node tasks/cli.js artifact save [id] --type review_report --content "[reviewer's report]" --agent reviewer
@@ -187,11 +185,7 @@ All use `subagent_type: "general-purpose"` and read their `.md` file.
 | Agent | File | When |
 |-------|------|------|
 | developer | `developer.md` | Step 3 |
-| reviewer | `reviewer.md` | Step 4 (default, consolidated) |
-| qa-reviewer | `qa-reviewer.md` | Step 4 (CRITICAL, 3-agent mode) |
-| security-ops | `security-ops.md` | Step 4 (CRITICAL, 3-agent mode) |
-| project-manager | `project-manager.md` | Step 4 (CRITICAL, 3-agent mode) |
-| task-manager | `task-manager.md` | On demand |
+| reviewer | `reviewer.md` | Step 4 (covers QA + security + scope in one pass) |
 | researcher | `researcher.md` | On demand |
 | decomposer | `decomposer.md` | On "decompose [goal]" |
 

@@ -218,10 +218,6 @@ async function main() {
     { src: '.claude/ORCHESTRATION.md', dest: '.claude/ORCHESTRATION.md' },
     { src: '.claude/agents/developer.md', dest: '.claude/agents/developer.md' },
     { src: '.claude/agents/reviewer.md', dest: '.claude/agents/reviewer.md' },
-    { src: '.claude/agents/qa-reviewer.md', dest: '.claude/agents/qa-reviewer.md' },
-    { src: '.claude/agents/security-ops.md', dest: '.claude/agents/security-ops.md' },
-    { src: '.claude/agents/project-manager.md', dest: '.claude/agents/project-manager.md' },
-    { src: '.claude/agents/task-manager.md', dest: '.claude/agents/task-manager.md' },
     { src: '.claude/agents/researcher.md', dest: '.claude/agents/researcher.md' },
     { src: 'tasks/db.js', dest: 'tasks/db.js' },
     { src: 'tasks/cli.js', dest: 'tasks/cli.js' },
@@ -306,6 +302,10 @@ async function main() {
 
   const deprecated = [
     '.claude/context/context-manifest.json',
+    '.claude/agents/qa-reviewer.md',
+    '.claude/agents/security-ops.md',
+    '.claude/agents/project-manager.md',
+    '.claude/agents/task-manager.md',
   ];
 
   for (const rel of deprecated) {
