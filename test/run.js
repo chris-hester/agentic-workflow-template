@@ -109,9 +109,9 @@ async function main() {
     assert(s.permissions.allow.includes('Bash(pnpm test)') && s.permissions.allow.includes('Bash(node tasks/cli.js *)'));
     assert(s.hooks.Stop && s.hooks.PostToolUse && s.hooks.SessionStart);
   });
-  await test('merges .mcp.json and .gitignore', () => {
+  await test('leaves an existing .mcp.json alone; merges .gitignore', () => {
     const m = JSON.parse(read(existing, '.mcp.json'));
-    assert(m.mcpServers.github && m.mcpServers['chrome-devtools']);
+    assert.deepStrictEqual(Object.keys(m.mcpServers), ['github']);
     const gi = read(existing, '.gitignore');
     assert(gi.startsWith('node_modules/\n.env\n') && gi.includes('tasks/*.db') && gi.split('\n').filter(l => l === 'node_modules/').length === 1);
   });
@@ -147,14 +147,37 @@ async function main() {
     assert(/no-undef/.test(out.hookSpecificOutput.additionalContext));
   });
 
+  await test('custom agents are kept and extraReviewers survive re-runs', () => {
+    const uiux = '---\nname: ui-ux\ndescription: visual QA\n---\nbody\n';
+    fs.writeFileSync(path.join(existing, '.claude', 'agents', 'ui-ux.md'), uiux);
+    const out = bootstrap(existing);
+    assert(/custom agent — not touched/.test(out) && /"extraReviewers"/.test(out), out);
+    const mp = path.join(existing, '.claude', 'agentic-workflow.json');
+    fs.writeFileSync(mp, JSON.stringify({ ...JSON.parse(fs.readFileSync(mp, 'utf8')), extraReviewers: [{ agent: 'ui-ux', when: 'pm' }] }, null, 2));
+    const again = bootstrap(existing);
+    assert(!/"extraReviewers": \[\{/.test(again), 'should not re-suggest an agent that is already wired');
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(mp, 'utf8')).extraReviewers, [{ agent: 'ui-ux', when: 'pm' }]);
+    assert.strictEqual(read(existing, '.claude/agents/ui-ux.md'), uiux);
+  });
+  await test('claim payload lists extra reviewers only for matching dimensions', () => {
+    withDeps(existing);
+    const add = args => Number(cli(existing, ['add', ...args]).match(/#(\d+)/)[1]);
+    const ui = add(['--title', 'Build pricing page layout', '--files', 'src/a.astro,src/b.astro', '--description', 'x'.repeat(120)]);
+    const util = add(['--title', 'Refactor date util', '--files', 'src/d.ts,src/e.ts', '--description', 'y'.repeat(120)]);
+    assert.deepStrictEqual(JSON.parse(cli(existing, ['route', String(ui), '--json'])).extra_reviewers, ['ui-ux']);
+    assert.deepStrictEqual(JSON.parse(cli(existing, ['route', String(util), '--json'])).extra_reviewers, []);
+  });
+
   // ─── Upgrade a real V5 install ───────────────────────────────────────────
-  console.log('\nUpgrade from V5 (last commit)');
+  console.log('\nUpgrade from V5 (the "feat: V5" commit)');
   const v5src = scenario('_v5src');
   const v5 = scenario('v5project');
   let v5ok = true;
   try {
     // Relative tar path: GNU tar on Windows reads "C:" as a remote host.
-    execFileSync('git', ['archive', '--format=tar', '-o', path.join(v5src, 'v5.tar'), 'HEAD'], { cwd: ROOT });
+    const v5commit = execFileSync('git', ['log', '--format=%H', '-1', '--grep=^feat: V5'], { cwd: ROOT, encoding: 'utf8' }).trim();
+    if (!v5commit) throw new Error('V5 commit not found in history');
+    execFileSync('git', ['archive', '--format=tar', '-o', path.join(v5src, 'v5.tar'), v5commit], { cwd: ROOT });
     execFileSync('tar', ['-xf', 'v5.tar'], { cwd: v5src });
   } catch (err) {
     v5ok = false;
@@ -205,9 +228,10 @@ async function main() {
       assert(s.permissions.allow.includes('Bash(node tasks/cli.js *)'));
       assert.strictEqual(s.hooks.PostToolUse.length, 1);
     });
-    await test('.mcp.json keeps the V5 playwright server (merge never removes)', () => {
+    await test('.mcp.json untouched (V5 servers and pins kept, nothing added)', () => {
       const m = JSON.parse(read(v5, '.mcp.json'));
-      assert(m.mcpServers.playwright && m.mcpServers['chrome-devtools']);
+      assert.deepStrictEqual(Object.keys(m.mcpServers).sort(), ['chrome-devtools', 'playwright', 'shadcn']);
+      assert(m.mcpServers['chrome-devtools'].args.includes('chrome-devtools-mcp@1.1.1'));
     });
     await test('tokens recovered and deprecated files removed', () => {
       const t = JSON.parse(read(v5, '.claude/agentic-workflow.json')).tokens;
@@ -284,6 +308,16 @@ async function main() {
     const list = cli(fresh, ['artifact', 'list', '2']);
     assert.strictEqual((list.match(/review_report/g) || []).length, N, list);
     assert(!exists(fresh, 'tasks/tasks.db.lock'), 'lock file left behind');
+  });
+  await test('pinned model without effort gets the effort its priority implies', () => {
+    const add = args => Number(cli(fresh, ['add', ...args]).match(/#(\d+)/)[1]);
+    const crit = add(['--title', 'Pinned critical', '--priority', 'CRITICAL', '--model', 'opus']);
+    const small = add(['--title', 'Pinned opus small', '--model', 'opus', '--files', 'a.ts']);
+    const maxed = add(['--title', 'Pinned effort', '--model', 'opus', '--effort', 'max']);
+    const r = id => JSON.parse(cli(fresh, ['route', String(id), '--json']));
+    assert.deepStrictEqual([r(crit).model, r(crit).effort], ['opus', 'xhigh']);
+    assert.deepStrictEqual([r(small).model, r(small).effort], ['opus', 'high']);
+    assert.deepStrictEqual([r(maxed).model, r(maxed).effort], ['opus', 'max']);
   });
   await test('brief prints a compact status', () => {
     assert(/Task DB: \d+ total/.test(cli(fresh, ['brief'])));
@@ -375,6 +409,22 @@ async function main() {
     assert(order.indexOf('review #1') < order.indexOf('develop #2'), 'task 2 started before task 1 finished: ' + order.join(', '));
     assert(maxActive >= 2, 'lanes did not run in parallel');
     assert(logs.some(l => /#1 → #2/.test(l)));
+  });
+  await test('extra reviewer runs in parallel; its FAIL drives the fix loop', async () => {
+    let uiuxCalls = 0;
+    const { result, calls } = await runWorkflow({ tasks: [payload(1, ['a.astro'], { reviews: 'qa,pm', extra_reviewers: ['ui-ux'] })] }, (p, o) => {
+      if (o.agentType === 'developer') return dev;
+      if (o.agentType === 'ui-ux') { uiuxCalls++; return { status: 'FAIL', summary: 'contrast', critical: [{ issue: 'cream-on-cream hover' }], warnings: ['tap target 40px'] }; }
+      return pass;
+    });
+    assert.strictEqual(uiuxCalls, 1, 'ui-ux should only run in the initial review');
+    assert(calls[1].agentType === 'reviewer' && calls[2].agentType === 'ui-ux');
+    assert(calls[2].prompt.includes('FIX_MODE: false') && calls[2].prompt.includes('--type ui-ux_report'));
+    const fix = calls.find(c => /^fix 1/.test(c.label));
+    assert(fix.prompt.includes('[ui-ux] cream-on-cream hover'), fix.prompt);
+    const r = result.results[0];
+    assert.strictEqual(r.outcome, 'PASS_WITH_WARNINGS');
+    assert.deepStrictEqual(r.warnings, ['[ui-ux] tap target 40px']);
   });
   await test('no tasks → error result instead of spawning', async () => {
     const { result, calls } = await runWorkflow({}, () => dev);

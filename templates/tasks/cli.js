@@ -90,6 +90,24 @@ async function routingFor(task) {
   return { model, effort, reviews, contextFiles: db.inferContextFiles(reviews) };
 }
 
+// Project-specific reviewers that run alongside `reviewer`, configured in
+// .claude/agentic-workflow.json as
+//   "extraReviewers": [{ "agent": "ui-ux", "when": "pm" }]
+// `when` is a review dimension (qa/security/pm) or "always".
+function extraReviewersFor(reviews) {
+  if (!reviews || reviews === 'none') return [];
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.claude', 'agentic-workflow.json'), 'utf8'));
+  } catch (_) {
+    return [];
+  }
+  const dims = reviews.split(',').map(s => s.trim());
+  return (manifest.extraReviewers || [])
+    .filter(r => r && r.agent && (r.when === 'always' || dims.includes(r.when)))
+    .map(r => r.agent);
+}
+
 // Shape consumed by the /work-task skill and the task-pipeline workflow.
 function taskPayload(task, routing) {
   return {
@@ -104,6 +122,7 @@ function taskPayload(task, routing) {
     model: routing.model,
     effort: routing.effort,
     reviews: routing.reviews,
+    extra_reviewers: extraReviewersFor(routing.reviews),
     context_files: routing.contextFiles,
   };
 }
@@ -111,7 +130,8 @@ function taskPayload(task, routing) {
 function printRouting(routing) {
   const effort = routing.effort && routing.effort !== 'default' ? routing.effort : 'model default';
   console.log('   Model: ' + routing.model + ' (effort: ' + effort + ')');
-  console.log('   Reviews: ' + routing.reviews);
+  const extras = extraReviewersFor(routing.reviews);
+  console.log('   Reviews: ' + routing.reviews + (extras.length ? ' (+ ' + extras.join(', ') + ')' : ''));
   console.log('   Context: ' + routing.contextFiles.join(', '));
 }
 

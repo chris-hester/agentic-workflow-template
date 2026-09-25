@@ -19,7 +19,7 @@ Then report:
 ```
 Dry Run — Task #<id>: <title>
   Routing:   <model> / effort <effort>   (fix round 3 would escalate to <next tier>)
-  Reviews:   <reviews>
+  Reviews:   <reviews> (+ <extra_reviewers>, if any)
   Context:   <context_files>
   Files:     <files_affected or "not listed">
   Preflight: ✅ | ❌ <problems> | ⚠ <notes>

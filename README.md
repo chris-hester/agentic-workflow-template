@@ -110,7 +110,7 @@ Re-running `bootstrap.js` on a project that already has the workflow **upgrades*
 |---|---|
 | `CLAUDE.md` | Only the `<!-- agentic-workflow:start/end -->` block is ours. Your own CLAUDE.md is kept and the block is appended. On upgrades only the block is replaced. Pre-V6 template CLAUDE.md files have their old Role / Forbidden Actions / CLI / Workflow sections swapped for the block; Key Decisions and Development Notes are kept. |
 | `.claude/settings.json` | Merged: your keys, permissions and hooks are kept, the template's are added. Broken V5 hooks and the V5 `ENABLE_TOOL_SEARCH` flag are removed, and old `Bash(x:*)` rules are deduped against their `Bash(x *)` equivalents. |
-| `.mcp.json` | Missing servers are added. Existing ones are never changed or removed. |
+| `.mcp.json` | An existing file is left alone (it's often gated by `enabledMcpjsonServers`); the installer just lists template servers you don't have. Created from the template only when absent. |
 | `.gitignore` | Missing entries are appended. |
 | `.claude/context/*`, `settings.local.json` | Created only if absent. |
 | Agents, skills, workflow, hooks, `tasks/*.js` | Template-owned: updated in place, previous version backed up if it differed. |
@@ -118,7 +118,7 @@ Re-running `bootstrap.js` on a project that already has the workflow **upgrades*
 
 Every file that gets changed is backed up under `.claude/backups/<timestamp>/` (gitignored). Re-running with no template changes is a no-op. Restart Claude Code in the project afterwards so it loads the new agents, skills and hooks.
 
-If your project already has its own `.claude/agents/developer.md` (or `reviewer.md`, etc.), it will be replaced and the original backed up. Rename yours first if you want both.
+If your project already has its own `.claude/agents/developer.md` (or `reviewer.md`, etc.), it will be replaced and the original backed up. Rename yours first if you want both. Other custom agents (say, a `ui-ux.md`) are never touched, and the installer tells you how to wire them into reviews (below).
 
 ---
 
@@ -218,6 +218,16 @@ your-project/
 | `decomposer` | opus / high | read-only | Goal → task plan + CLI commands |
 | `researcher` | sonnet / medium | read-only | Web/doc research with sources. For codebase-only questions use the built-in `Explore` agent. |
 
+### Extra reviewers
+
+To run a project-specific agent alongside `reviewer` (a visual/UI auditor, a domain expert), add it to `.claude/agentic-workflow.json`:
+
+```json
+"extraReviewers": [{ "agent": "ui-ux", "when": "pm" }]
+```
+
+`when` is a review dimension (`qa`, `security`, `pm`) or `always`. On matching tasks it runs in parallel with the main reviewer, told to review only (`FIX_MODE: false`) and to save a `<agent>_report` artifact. The worst status wins, and its Must Fix items go into the fix round tagged `[ui-ux]`. Fix verification is done by the main reviewer. `route <id>` shows which extra reviewers a task would get. The setting survives upgrades.
+
 Edit the frontmatter (`model`, `effort`, `disallowedTools`) to change defaults; upgrades back up your version before replacing it. The reviewer uses project-scoped memory, so what it learns is shared by everyone working on the repo.
 
 ---
@@ -237,7 +247,7 @@ Edit the frontmatter (`model`, `effort`, `disallowedTools`) to change defaults; 
 - **Fix rounds** keep the task's tier. The **3rd round escalates**: haiku → sonnet/high, sonnet → opus/high, opus → opus/xhigh. (V5 sent every `Fix:` task to Haiku, i.e. the weakest model for the tasks that had just failed.)
 - **Reviews** run on the reviewer's opus/high; **scoped fix verification** on sonnet/high.
 - **Fable** is never chosen automatically. For a task that keeps getting blocked: `node tasks/cli.js update <id> --model fable`.
-- **Pin** anything with `--model` / `--effort` on `add` or `update`. Pinned routing always wins.
+- **Pin** anything with `--model` / `--effort` on `add` or `update`. Pinned routing always wins. A model pinned without an effort still gets the effort its priority/size implies (pinned opus on a CRITICAL task runs at xhigh).
 
 **Review dimensions:** `qa` always; `security` when the task mentions a security keyword (API, auth, env, form, token…, plus your CMS); `pm` for user-facing work (page, component, layout, UX…) that isn't a fix.
 
@@ -301,7 +311,7 @@ For larger batches across several Claude Code windows, use `suggest-batch --sess
 | `chrome-devtools-mcp@1.10.1` (Google) | Real Chrome: screenshots, console, network, performance traces |
 | `shadcn@4.21.0 mcp` | Live shadcn component source (stops prop hallucination) |
 
-Versions are pinned and chrome-devtools telemetry is off. Playwright was dropped from the default set because it overlaps chrome-devtools for the same browser target. Add it when you need cross-browser or auth-flow tests: `claude mcp add --scope project playwright -- npx -y @playwright/mcp@0.0.82`. Upgrades never remove an MCP server you already have.
+Versions are pinned and chrome-devtools telemetry is off. Playwright was dropped from the default set because it overlaps chrome-devtools for the same browser target. Add it when you need cross-browser or auth-flow tests: `claude mcp add --scope project playwright -- npx -y @playwright/mcp@0.0.82`. These are only written for projects without a `.mcp.json`; installs and upgrades never add to, change or remove an existing one.
 
 ### Hooks (`.claude/settings.json`)
 

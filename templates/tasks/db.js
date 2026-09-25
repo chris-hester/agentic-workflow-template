@@ -218,9 +218,11 @@ async function addTask({ title, priority = 'MEDIUM', group_name, category, descr
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [title, priority, status, group_name || null, category || null, description || null, files_affected || null, tests || null, blocked_by, model || null, effort || null, reviews || null, parent_task_id || null, iteration || null]
   );
+  // Read the id before saving: sql.js export() reopens the DB, which resets
+  // last_insert_rowid() to 0.
+  const id = database.exec('SELECT last_insert_rowid() as id')[0].values[0][0];
   saveDb(database);
-  const result = database.exec('SELECT last_insert_rowid() as id');
-  return result[0].values[0][0];
+  return id;
 }
 
 // Drops dependencies that are already completed; returns null when none remain.
@@ -757,8 +759,20 @@ function hasExplicitRouting(task) {
   return Boolean(task.model) && !(task.model === 'sonnet' && !task.effort);
 }
 
+const DEFAULT_EFFORT = { haiku: 'default', sonnet: 'medium', opus: 'high', fable: 'high' };
+
+// A model pinned without an effort still gets the effort its priority/size
+// implies when inference agrees on the model (a pinned-opus CRITICAL task runs
+// at xhigh), otherwise that model's default.
+function effortForPinned(task) {
+  if (task.effort && task.effort !== 'default') return task.effort;
+  const inferred = inferRouting(task);
+  if (inferred.model === task.model) return inferred.effort;
+  return DEFAULT_EFFORT[task.model] || 'default';
+}
+
 async function resolveRouting(task) {
-  if (hasExplicitRouting(task)) return { model: task.model, effort: task.effort || 'default' };
+  if (hasExplicitRouting(task)) return { model: task.model, effort: effortForPinned(task) };
 
   // Fix tasks were failing review, so never route them below the parent's
   // tier; on the final attempt go one tier up before the circuit breaker trips.

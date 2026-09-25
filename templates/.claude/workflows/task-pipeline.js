@@ -100,6 +100,33 @@ function reviewPrompt(task, iteration) {
   ].join('\n')
 }
 
+function extraReviewPrompt(task, iteration, agentName) {
+  return [
+    `Task ID: ${task.id} | Iteration: ${iteration}`,
+    `Title: ${task.title}`,
+    `Description: ${task.description || '(none)'}`,
+    `Files affected: ${task.files_affected.length ? task.files_affected.join(', ') : '(see the dev report)'}`,
+    `REVIEW DIMENSIONS: ${task.reviews}`,
+    'FIX_MODE: false — review only, do not modify any files.',
+    '',
+    `You are reviewing alongside the main reviewer, from your own specialty. Read the dev report (node tasks/cli.js artifact get ${task.id} --type dev_report), review the change, save your report with: node tasks/cli.js artifact save ${task.id} --type ${agentName}_report --iteration ${iteration} --agent ${agentName} --stdin, and return PASS, PASS_WITH_WARNINGS or FAIL.`,
+  ].join('\n')
+}
+
+const SEVERITY = { PASS: 0, PASS_WITH_WARNINGS: 1, FAIL: 2 }
+
+// Worst status wins; findings from extra reviewers are tagged with their name.
+function mergeReviews(named) {
+  const worst = named.reduce((a, r) => (SEVERITY[r.review.status] > SEVERITY[a] ? r.review.status : a), 'PASS')
+  const tag = (name, text) => (name === 'reviewer' ? text : `[${name}] ${text}`)
+  return {
+    status: worst,
+    summary: named.map(r => tag(r.name, r.review.summary)).join(' | '),
+    critical: named.flatMap(r => r.review.critical.map(c => ({ ...c, issue: tag(r.name, c.issue) }))),
+    warnings: named.flatMap(r => r.review.warnings.map(w => tag(r.name, w))),
+  }
+}
+
 function scopedPrompt(task, iteration, critical) {
   return [
     'REVIEW MODE: SCOPED FIX VERIFICATION',
@@ -124,9 +151,22 @@ async function runTask(task) {
   const merged = { summary: dev.summary, files_modified: dev.files_modified, dev_issues: dev.issues }
   if (task.reviews === 'none') return { ...out, ...merged, outcome: 'PASS', warnings: [] }
 
-  let review = await once(() => agent(reviewPrompt(task, 1),
-    { label: `review ${tag}`, phase: 'Review', agentType: 'reviewer', schema: REVIEW_SCHEMA }))
-  if (!review) return { ...out, ...merged, outcome: 'ERROR', summary: 'Reviewer agent failed twice' }
+  // Main reviewer plus any project-specific reviewers (extra_reviewers from the
+  // claim payload) in parallel. Fix rounds are verified by the main reviewer only.
+  const extras = task.extra_reviewers || []
+  const reviews = await parallel([
+    () => once(() => agent(reviewPrompt(task, 1),
+      { label: `review ${tag}`, phase: 'Review', agentType: 'reviewer', schema: REVIEW_SCHEMA }))
+      .then(review => ({ name: 'reviewer', review })),
+    ...extras.map(name => () => once(() => agent(extraReviewPrompt(task, 1, name),
+      { label: `${name} ${tag}`, phase: 'Review', agentType: name, schema: REVIEW_SCHEMA }))
+      .then(review => ({ name, review }))),
+  ])
+  const failed = ['reviewer', ...extras].filter((name, i) => !reviews[i] || !reviews[i].review)
+  if (failed.length) {
+    return { ...out, ...merged, outcome: 'ERROR', summary: `Review agent(s) failed twice: ${failed.join(', ')}` }
+  }
+  let review = mergeReviews(reviews)
   const warnings = [...review.warnings]
 
   let fixRound = 0
