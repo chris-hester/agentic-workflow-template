@@ -325,7 +325,10 @@ The hooks are Node scripts (`.cjs`, so they work in `"type": "module"` projects)
 ### Permissions
 
 - **Allowed:** reads anywhere; edits in `src/`, `tests/`, `public/`, `.claude/`; safe git commands; project test/lint/build scripts; vitest/jest/playwright; lighthouse + axe
-- **Denied:** reads of `.env` / `.ssh` / `.aws` / secrets; package installs; `npx -y`; `curl` / `wget`; `rm -rf`; `git push`; `git reset --hard`; editing `tasks/tasks.db` directly
+- **Denied:** reads of `.env` / `.ssh` / `.aws` / secrets; package installs; `npx -y`; `curl` / `wget`; `rm -rf`; force pushes (`--force`, `--force-with-lease`, `-f`, `+branch` refspecs); `git reset --hard`; editing `tasks/tasks.db` directly
+- **Not denied:** a normal `git push`. It prompts unless you allow it (e.g. `Bash(git push *)` in `settings.local.json`). V5 denied every push; upgrading removes that rule.
+
+A deny rule wins over any allow rule, including a `Bash(*)` in `settings.local.json`, and only matches commands written that way (`git -C . push --force` slips past). Treat these rules as guard rails, not a sandbox.
 
 Personal overrides go in `.claude/settings.local.json` (created empty, never overwritten).
 

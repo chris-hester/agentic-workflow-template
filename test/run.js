@@ -105,6 +105,7 @@ async function main() {
   });
   await test('merges settings.json (user keys, allow rules and hooks kept)', () => {
     const s = JSON.parse(read(existing, '.claude/settings.json'));
+    assert(!s.permissions.deny.some(r => r === 'Bash(git push *)' || r === 'Bash(git push)'), 'plain pushes must not be denied');
     assert.strictEqual(s.model, 'opus');
     assert(s.permissions.allow.includes('Bash(pnpm test)') && s.permissions.allow.includes('Bash(node tasks/cli.js *)'));
     assert(s.hooks.Stop && s.hooks.PostToolUse && s.hooks.SessionStart);
@@ -227,6 +228,9 @@ async function main() {
       assert(!s.permissions.allow.includes('Bash(node tasks/cli.js:*)'));
       assert(s.permissions.allow.includes('Bash(node tasks/cli.js *)'));
       assert.strictEqual(s.hooks.PostToolUse.length, 1);
+      // V5 blocked every push; V6 lifts that and blocks force pushes only.
+      assert(!s.permissions.deny.includes('Bash(git push *)'));
+      assert(s.permissions.deny.includes('Bash(git push *--force*)'));
     });
     await test('.mcp.json untouched (V5 servers and pins kept, nothing added)', () => {
       const m = JSON.parse(read(v5, '.mcp.json'));
