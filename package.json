@@ -1,13 +1,14 @@
 {
   "name": "agentic-workflow-template",
-  "version": "1.0.0",
+  "version": "6.0.0",
   "description": "Bootstrap an agentic coding workflow with orchestrated subagents, task management, and automated reviews for Claude Code",
   "main": "bootstrap.js",
   "bin": {
     "agentic-workflow": "./bootstrap.js"
   },
   "scripts": {
-    "setup": "node bootstrap.js"
+    "setup": "node bootstrap.js",
+    "test": "node test/run.js"
   },
   "keywords": ["claude", "agentic", "workflow", "code-generation", "subagents"],
   "license": "MIT"

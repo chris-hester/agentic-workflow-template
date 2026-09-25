@@ -57,8 +57,10 @@ function formatTaskDetail(task) {
     `║ Category:   ${task.category || 'None'}`,
   ];
 
-  lines.push(`║ Model:      ${task.model || 'sonnet'}`);
-  lines.push(`║ Reviews:    ${task.reviews || 'auto (category-based)'}`);
+  const effortNote = task.effort && task.effort !== 'default' ? ` (effort: ${task.effort})` : '';
+  lines.push(`║ Model:      ${task.model ? task.model + effortNote : 'auto (inferred at claim)'}`);
+  lines.push(`║ Reviews:    ${task.reviews || 'auto (inferred at claim)'}`);
+  if (task.parent_task_id) lines.push(`║ Parent:     #${task.parent_task_id} (iteration ${task.iteration || 1})`);
   if (task.description) lines.push(`║ Description: ${task.description}`);
   if (task.files_affected) lines.push(`║ Files:      ${task.files_affected}`);
   if (task.tests) lines.push(`║ Tests:      ${task.tests}`);
@@ -76,6 +78,49 @@ function formatTaskDetail(task) {
   lines.push(`╚══════════════════════════════════════════════════`);
 
   return lines.join('\n');
+}
+
+function splitFiles(value) {
+  return (value || '').split(',').map(s => s.trim()).filter(Boolean);
+}
+
+async function routingFor(task) {
+  const { model, effort } = await db.resolveRouting(task);
+  const reviews = task.reviews || db.inferReviews(task);
+  return { model, effort, reviews, contextFiles: db.inferContextFiles(reviews) };
+}
+
+// Shape consumed by the /work-task skill and the task-pipeline workflow.
+function taskPayload(task, routing) {
+  return {
+    id: task.id,
+    title: task.title,
+    priority: task.priority,
+    description: task.description || '',
+    files_affected: splitFiles(task.files_affected),
+    fix_required: task.fix_required || null,
+    parent_task_id: task.parent_task_id || null,
+    iteration: task.iteration || 1,
+    model: routing.model,
+    effort: routing.effort,
+    reviews: routing.reviews,
+    context_files: routing.contextFiles,
+  };
+}
+
+function printRouting(routing) {
+  const effort = routing.effort && routing.effort !== 'default' ? routing.effort : 'model default';
+  console.log('   Model: ' + routing.model + ' (effort: ' + effort + ')');
+  console.log('   Reviews: ' + routing.reviews);
+  console.log('   Context: ' + routing.contextFiles.join(', '));
+}
+
+function readStdin() {
+  try {
+    return fs.readFileSync(0, 'utf8');
+  } catch (_) {
+    return '';
+  }
 }
 
 async function main() {
@@ -117,7 +162,7 @@ async function main() {
 
       case 'add': {
         const flags = parseFlags(args.slice(1));
-        if (!flags.title) { console.error('Usage: add --title "Title" [--priority HIGH] [--group A] [--description "..."] [--category "..."] [--files "..."] [--blocked-by "1,2"] [--model sonnet] [--reviews "qa,security,pm"]'); process.exit(1); }
+        if (!flags.title) { console.error('Usage: add --title "Title" [--priority HIGH] [--group A] [--description "..."] [--category "..."] [--files "..."] [--blocked-by "1,2"] [--model haiku|sonnet|opus|fable] [--effort low|medium|high|xhigh|max] [--reviews "qa,security,pm"]'); process.exit(1); }
         const id = await db.addTask({
           title: flags.title,
           priority: flags.priority || 'MEDIUM',
@@ -127,12 +172,13 @@ async function main() {
           files_affected: flags.files,
           tests: flags.tests,
           blocked_by: flags['blocked-by'],
-          model: flags.model || 'sonnet',
+          model: typeof flags.model === 'string' ? flags.model : undefined,
+          effort: typeof flags.effort === 'string' ? flags.effort : undefined,
           reviews: flags.reviews,
           parent_task_id: flags['parent-task'] ? parseInt(flags['parent-task']) : undefined,
           iteration: flags.iteration ? parseInt(flags.iteration) : undefined,
         });
-        console.log(`✅ Task #${id} created: ${flags.title} [model: ${flags.model || 'sonnet'}]`);
+        console.log(`✅ Task #${id} created: ${flags.title} [model: ${flags.model || 'auto'}]`);
         break;
       }
 
@@ -149,8 +195,14 @@ async function main() {
         if (flags.description) updates.description = flags.description;
         if (flags.files) updates.files_affected = flags.files;
         if (flags.tests) updates.tests = flags.tests;
-        if (flags['blocked-by']) updates.blocked_by = flags['blocked-by'];
+        if (flags['blocked-by']) {
+          updates.blocked_by = await db.openDependencies(flags['blocked-by']);
+          const current = await db.getTask(id);
+          if (current && current.status === 'ready' && updates.blocked_by && !flags.status) updates.status = 'blocked';
+        }
         if (flags.model) updates.model = flags.model;
+        if (flags.effort) updates.effort = flags.effort;
+        else if (flags.model) updates.effort = 'default';
         if (flags.reviews) updates.reviews = flags.reviews;
 
         await db.updateTask(id, updates);
@@ -161,23 +213,88 @@ async function main() {
       case 'claim': {
         const id = parseInt(args[1]);
         const flags = parseFlags(args.slice(2));
-        if (!id) { console.error('Usage: claim <id> --agent <n> [--session <session-id>]'); process.exit(1); }
+        if (!id) { console.error('Usage: claim <id> --agent <n> [--session <session-id>] [--json]'); process.exit(1); }
 
         const task = await db.getTask(id);
         if (!task) { console.error('Task #' + id + ' not found'); process.exit(1); }
 
-        const model = task.model && task.model !== 'sonnet' ? task.model : db.inferModel(task);
-        const reviews = task.reviews || db.inferReviews(task);
-        const contextFiles = db.inferContextFiles(reviews);
-
-        await db.updateTask(id, { model, reviews });
+        const routing = await routingFor(task);
+        await db.updateTask(id, { model: routing.model, effort: routing.effort, reviews: routing.reviews });
         await db.claimTask(id, flags.agent || 'primary', flags.session);
-        const sessionNote = flags.session ? ' (session: ' + flags.session + ')' : '';
 
+        if (flags.json) {
+          console.log(JSON.stringify(taskPayload(await db.getTask(id), routing), null, 2));
+          break;
+        }
+        const sessionNote = flags.session ? ' (session: ' + flags.session + ')' : '';
         console.log('✅ Task #' + id + ' claimed by ' + (flags.agent || 'primary') + sessionNote);
-        console.log('   Model: ' + model);
-        console.log('   Reviews: ' + reviews);
-        console.log('   Context: ' + contextFiles.join(', '));
+        printRouting(routing);
+        break;
+      }
+
+      case 'route': {
+        // Same inference as claim, without claiming or writing anything.
+        const id = parseInt(args[1]);
+        const flags = parseFlags(args.slice(2));
+        if (!id) { console.error('Usage: route <id> [--json]'); process.exit(1); }
+        const task = await db.getTask(id);
+        if (!task) { console.error('Task #' + id + ' not found'); process.exit(1); }
+        const routing = await routingFor(task);
+        if (flags.json) {
+          console.log(JSON.stringify(taskPayload(task, routing), null, 2));
+          break;
+        }
+        console.log('Task #' + id + ': ' + task.title);
+        printRouting(routing);
+        break;
+      }
+
+      case 'preflight': {
+        // Cross-platform replacement for the old bash pre-flight loop.
+        const id = parseInt(args[1]);
+        const flags = parseFlags(args.slice(2));
+        if (!id) { console.error('Usage: preflight <id> [--json]'); process.exit(1); }
+        const task = await db.getTask(id);
+        if (!task) { console.error('Task #' + id + ' not found'); process.exit(1); }
+
+        const problems = [];
+        const notes = [];
+        if (task.status === 'completed') problems.push('Task is already completed');
+        if (task.status === 'blocked') problems.push('Task is blocked: ' + (task.fix_required || 'no reason recorded'));
+        for (const dep of splitFiles(task.blocked_by).map(Number).filter(Boolean)) {
+          const depTask = await db.getTask(dep);
+          if (depTask && depTask.status !== 'completed') problems.push('Depends on #' + dep + ' (' + depTask.status + ')');
+        }
+        const files = splitFiles(task.files_affected);
+        const missing = files.filter(f => !fs.existsSync(path.resolve(process.cwd(), f)));
+        if (missing.length) notes.push('Not on disk yet (fine if the task creates them): ' + missing.join(', '));
+        if (!files.length) notes.push('No files_affected listed — developer will search the codebase');
+        if (!fs.existsSync(path.join(process.cwd(), '.claude', 'context', 'DIGEST.md'))) {
+          notes.push('No context digest — run: node tasks/cli.js context-digest');
+        }
+
+        const ok = problems.length === 0;
+        if (flags.json) {
+          console.log(JSON.stringify({ id, ok, problems, notes }, null, 2));
+          break;
+        }
+        console.log((ok ? '✅' : '❌') + ' Preflight for task #' + id);
+        for (const p of problems) console.log('   ✗ ' + p);
+        for (const n of notes) console.log('   ⚠ ' + n);
+        break;
+      }
+
+      case 'brief': {
+        // Compact status for the SessionStart hook — lands in Claude's context.
+        const stats = await db.getStats();
+        const inProgress = await db.listTasks({ status: 'in_progress' });
+        const next = await db.getNextTask();
+        console.log(`Task DB: ${stats.total} total | ${stats.ready} ready | ${stats.in_progress} in progress | ${stats.blocked} blocked | ${stats.completed} done (${stats.completion_pct}%)`);
+        if (inProgress.length) {
+          console.log('In progress (may be left over from an interrupted session): ' +
+            inProgress.map(t => '#' + t.id + ' ' + t.title).join('; '));
+        }
+        if (next) console.log(`Next ready: #${next.id} [${next.priority}] ${next.title}`);
         break;
       }
 
@@ -472,11 +589,15 @@ async function main() {
         if (subCmd === 'save') {
           const taskId = parseInt(args[2]);
           const flags = parseFlags(args.slice(3));
-          if (!taskId || !flags.type || !flags.content) {
-            console.error('Usage: artifact save <task-id> --type <dev_report|review_report|fix_dev|fix_review> --content "..." [--agent name] [--iteration N]');
+          // Long reports break shell quoting, so prefer --stdin (heredoc) or --content-file.
+          let content = typeof flags.content === 'string' ? flags.content : null;
+          if (flags.stdin) content = readStdin();
+          if (typeof flags['content-file'] === 'string') content = fs.readFileSync(flags['content-file'], 'utf8');
+          if (!taskId || !flags.type || !content || !content.trim()) {
+            console.error('Usage: artifact save <task-id> --type <dev_report|review_report> (--stdin | --content-file <path> | --content "...") [--agent name] [--iteration N]');
             process.exit(1);
           }
-          await db.saveArtifact(taskId, flags.type, flags.content, flags.agent, parseInt(flags.iteration) || 1);
+          await db.saveArtifact(taskId, flags.type, content, flags.agent, parseInt(flags.iteration) || 1);
           console.log('✅ Artifact saved: task #' + taskId + ' [' + flags.type + ']');
           break;
         }
@@ -594,9 +715,11 @@ async function main() {
 ║    list [--status X] [--priority X] [--session X]  List tasks
 ║    get <id>                                         Get task details
 ║    add --title "..." [--priority X] [--model X]     Create task
-║        [--group X] [--reviews "qa,security,pm"]
+║        [--effort X] [--group X] [--reviews "qa,security,pm"]
 ║    update <id> --field value                        Update task
-║    claim <id> [--agent name] [--session id]         Claim task
+║    claim <id> [--agent name] [--session id] [--json]  Claim task + route
+║    route <id> [--json]                              Show routing, no claim
+║    preflight <id> [--json]                          Check deps/files first
 ║    release <id>                                     Release task
 ║    complete <id> --summary "..."                    Complete task
 ║    block <id> --reason "..."                        Block task
@@ -608,6 +731,7 @@ async function main() {
 ║    stale [--hours N]                                Find stale tasks
 ║    next                                             Suggest next task
 ║    agent-stats                                      Agent performance
+║    brief                                            One-paragraph status
 ║
 ║  Multi-Session:
 ║    session-start <name> [--agent type]              Start session
@@ -627,7 +751,8 @@ async function main() {
 ║    export [--format json|md] [--file path]          Export tasks
 ║
 ║  Artifacts:
-║    artifact save <id> --type <type> --content "..."  Save artifact
+║    artifact save <id> --type <type> --stdin         Save artifact (heredoc)
+║        [--content-file path | --content "..."] [--iteration N]
 ║    artifact get <id> --type <type>                  Retrieve artifact
 ║    artifact list <id>                               List task artifacts
 ║

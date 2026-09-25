@@ -1,4 +1,5 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
     "allow": [
       "Read(**)",
@@ -19,22 +20,28 @@
       "Write(tests/**)",
       "Write(public/**)",
       "Write(.claude/handoffs/**)",
-      "Bash(node tasks/cli.js:*)",
-      "Bash(npm test:*)",
-      "Bash(npm run test:*)",
-      "Bash(npm run lint:*)",
-      "Bash(npm run typecheck:*)",
+      "Bash(node tasks/cli.js *)",
+      "Bash(npm test)",
+      "Bash(npm test *)",
+      "Bash(npm run test *)",
+      "Bash(npx vitest *)",
+      "Bash(npx jest *)",
+      "Bash(npx playwright test *)",
+      "Bash(npm run lint *)",
+      "Bash(npm run typecheck *)",
       "Bash(npm run build)",
       "Bash(npm run dev)",
-      "Bash(npx lighthouse:*)",
-      "Bash(npx @axe-core/cli:*)",
+      "Bash(npx lighthouse *)",
+      "Bash(npx @axe-core/cli *)",
       "Bash(git status)",
-      "Bash(git diff:*)",
-      "Bash(git log:*)",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git branch:*)",
-      "Bash(git checkout:*)"
+      "Bash(git status *)",
+      "Bash(git diff)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git branch *)",
+      "Bash(git checkout *)"
     ],
     "deny": [
       "Read(.env)",
@@ -43,18 +50,20 @@
       "Read(**/.ssh/**)",
       "Read(**/secrets/**)",
       "Read(**/credentials/**)",
-      "Bash(npm install:*)",
-      "Bash(npm i:*)",
-      "Bash(yarn add:*)",
-      "Bash(yarn install:*)",
-      "Bash(pnpm add:*)",
-      "Bash(pnpm install:*)",
+      "Edit(tasks/tasks.db)",
+      "Bash(npm install *)",
+      "Bash(npm i *)",
+      "Bash(yarn add *)",
+      "Bash(yarn install *)",
+      "Bash(pnpm add *)",
+      "Bash(pnpm install *)",
       "Bash(npx -y *)",
       "Bash(curl *)",
       "Bash(wget *)",
       "Bash(rm -rf *)",
+      "Bash(git push)",
       "Bash(git push *)",
-      "Bash(git push --force *)"
+      "Bash(git reset --hard *)"
     ]
   },
   "hooks": {
@@ -63,7 +72,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node tasks/cli.js stats"
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.cjs\"",
+            "timeout": 30
           }
         ]
       }
@@ -74,22 +84,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx --no-install eslint --fix \"$CLAUDE_FILE_PATHS\" 2>&1 | tail -20 || true"
-          }
-        ]
-      },
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "case \"$CLAUDE_FILE_PATHS\" in *package.json) npm audit --audit-level=high 2>&1 | tail -10 || true ;; esac"
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/post-edit.cjs\"",
+            "timeout": 120
           }
         ]
       }
     ]
-  },
-  "env": {
-    "ENABLE_TOOL_SEARCH": "true"
   }
 }

@@ -8,6 +8,7 @@ node_modules/
 
 # Database
 tasks/*.db
+tasks/*.db.lock
 
 # Build output
 dist/
@@ -39,5 +40,6 @@ yarn-error.log*
 # Context digest (auto-generated)
 .claude/context/DIGEST.md
 
-# Backup files from upgrades
+# Backups from installs/upgrades
+.claude/backups/
 *.backup-*

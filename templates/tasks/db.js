@@ -3,17 +3,66 @@ const fs = require('fs');
 const path = require('path');
 
 const DB_PATH = path.join(__dirname, 'tasks.db');
+const LOCK_PATH = DB_PATH + '.lock';
+const LOCK_STALE_MS = 30000;
+const LOCK_WAIT_MS = 15000;
 
 let db = null;
+let lockHeld = false;
+
+// ═══ LOCKING ═══
+// sql.js loads the whole DB into memory and writes the whole file back, so two
+// CLI processes running at once (parallel subagents) would silently drop each
+// other's writes. Every process holds an exclusive lock file from first DB
+// access until close().
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function acquireLock() {
+  if (lockHeld) return;
+  const start = Date.now();
+  while (true) {
+    try {
+      fs.writeFileSync(LOCK_PATH, String(process.pid), { flag: 'wx' });
+      lockHeld = true;
+      process.once('exit', releaseLock);
+      return;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      try {
+        if (Date.now() - fs.statSync(LOCK_PATH).mtimeMs > LOCK_STALE_MS) {
+          fs.unlinkSync(LOCK_PATH);
+          continue;
+        }
+      } catch (_) {
+        continue; // lock vanished between checks — retry immediately
+      }
+      if (Date.now() - start > LOCK_WAIT_MS) {
+        throw new Error('Task DB is locked (' + LOCK_PATH + '). If no other task CLI is running, delete the lock file.');
+      }
+      sleepSync(50);
+    }
+  }
+}
+
+function releaseLock() {
+  if (!lockHeld) return;
+  lockHeld = false;
+  try { fs.unlinkSync(LOCK_PATH); } catch (_) {}
+}
 
 async function getDb() {
   if (db) return db;
 
+  acquireLock();
   const SQL = await initSqlJs();
 
   if (fs.existsSync(DB_PATH)) {
     const buffer = fs.readFileSync(DB_PATH);
     db = new SQL.Database(buffer);
+    if (migrateSchema(db)) saveDb(db);
   } else {
     db = new SQL.Database();
     initializeSchema(db);
@@ -22,7 +71,52 @@ async function getDb() {
   return db;
 }
 
+// Columns added after the original release. Databases created by any earlier
+// template version get these on first open, so no separate migration step.
+const ADDED_TASK_COLUMNS = {
+  claimed_by_session: 'TEXT',
+  model: 'TEXT',
+  effort: 'TEXT',
+  reviews: 'TEXT',
+  parent_task_id: 'INTEGER',
+  iteration: 'INTEGER DEFAULT 1',
+};
+
+function migrateSchema(database) {
+  const tableCount = () => database.exec("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'")[0].values[0][0];
+  const before = tableCount();
+  createTables(database);
+  let changed = tableCount() !== before;
+
+  const info = database.exec('PRAGMA table_info(tasks)');
+  const existing = info[0] ? info[0].values.map(row => row[1]) : [];
+  for (const [col, type] of Object.entries(ADDED_TASK_COLUMNS)) {
+    if (!existing.includes(col)) {
+      database.run(`ALTER TABLE tasks ADD COLUMN ${col} ${type}`);
+      changed = true;
+    }
+  }
+
+  createIndexes(database);
+  return changed;
+}
+
 function initializeSchema(database) {
+  createTables(database);
+  createIndexes(database);
+  saveDb(database);
+}
+
+function createIndexes(database) {
+  database.run(`
+    CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(claimed_by_session)
+  `);
+  database.run(`
+    CREATE INDEX IF NOT EXISTS idx_artifacts_task ON task_artifacts(task_id, artifact_type)
+  `);
+}
+
+function createTables(database) {
   database.run(`
     CREATE TABLE IF NOT EXISTS tasks (
       id INTEGER PRIMARY KEY,
@@ -42,17 +136,14 @@ function initializeSchema(database) {
       completed_at TEXT,
       completed_by TEXT,
       completion_summary TEXT,
-      model TEXT DEFAULT 'sonnet',
+      model TEXT,
+      effort TEXT,
       reviews TEXT,
       parent_task_id INTEGER,
       iteration INTEGER DEFAULT 1,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     )
-  `);
-
-  database.run(`
-    CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(claimed_by_session)
   `);
 
   database.run(`
@@ -94,10 +185,6 @@ function initializeSchema(database) {
   `);
 
   database.run(`
-    CREATE INDEX IF NOT EXISTS idx_artifacts_task ON task_artifacts(task_id, artifact_type)
-  `);
-
-  database.run(`
     CREATE TABLE IF NOT EXISTS review_feedback (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       task_id INTEGER,
@@ -108,8 +195,6 @@ function initializeSchema(database) {
       created_at TEXT DEFAULT (datetime('now'))
     )
   `);
-
-  saveDb(database);
 }
 
 function saveDb(database) {
@@ -121,16 +206,32 @@ function saveDb(database) {
 }
 
 // Task CRUD Operations
-async function addTask({ title, priority = 'MEDIUM', group_name, category, description, files_affected, tests, blocked_by, model = 'sonnet', reviews, parent_task_id, iteration }) {
+async function addTask({ title, priority = 'MEDIUM', group_name, category, description, files_affected, tests, blocked_by, model, effort, reviews, parent_task_id, iteration }) {
   const database = await getDb();
+  // model stays NULL unless given explicitly, so claim-time inference can tell
+  // "never routed" apart from "pinned by the user".
+  if (model && !effort) effort = 'default';
+  blocked_by = await openDependencies(blocked_by);
+  const status = blocked_by ? 'blocked' : 'ready';
   database.run(
-    `INSERT INTO tasks (title, priority, group_name, category, description, files_affected, tests, blocked_by, model, reviews, parent_task_id, iteration)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [title, priority, group_name || null, category || null, description || null, files_affected || null, tests || null, blocked_by || null, model, reviews || null, parent_task_id || null, iteration || null]
+    `INSERT INTO tasks (title, priority, status, group_name, category, description, files_affected, tests, blocked_by, model, effort, reviews, parent_task_id, iteration)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [title, priority, status, group_name || null, category || null, description || null, files_affected || null, tests || null, blocked_by, model || null, effort || null, reviews || null, parent_task_id || null, iteration || null]
   );
   saveDb(database);
   const result = database.exec('SELECT last_insert_rowid() as id');
   return result[0].values[0][0];
+}
+
+// Drops dependencies that are already completed; returns null when none remain.
+async function openDependencies(blockedBy) {
+  const ids = (blockedBy || '').split(',').map(s => parseInt(s.trim())).filter(Boolean);
+  const open = [];
+  for (const id of ids) {
+    const dep = await getTask(id);
+    if (!dep || dep.status !== 'completed') open.push(id);
+  }
+  return open.length ? open.join(',') : null;
 }
 
 async function getTask(id) {
@@ -620,20 +721,66 @@ async function exportTasks(format = 'json') {
 const SECURITY_KEYWORDS = '{{SECURITY_KEYWORDS}}'.split(',').map(s => s.trim().toLowerCase());
 const UX_KEYWORDS = ['page', 'component', 'section', 'layout', 'design', 'content', 'navigation', 'ux'];
 
-function inferModel(task) {
-  const filesCount = (task.files_affected || '').split(',').filter(s => s.trim()).length;
+// Fix rounds allowed before a task is blocked. The last round escalates.
+const MAX_FIX_ITERATIONS = 3;
+
+function countFiles(task) {
+  return (task.files_affected || '').split(',').filter(s => s.trim()).length;
+}
+
+// Returns { model, effort }. effort 'default' means "don't pass one" (Haiku).
+function inferRouting(task) {
+  const filesCount = countFiles(task);
   const descLen = (task.description || '').length;
-  if (filesCount <= 1 && descLen < 100) return 'haiku';
-  if (/^(Fix:|Follow-up:)/i.test(task.title)) return 'haiku';
-  if (task.priority === 'CRITICAL' || filesCount >= 5) return 'opus';
-  return 'sonnet';
+  if (task.priority === 'CRITICAL') return { model: 'opus', effort: 'xhigh' };
+  if (filesCount >= 5) return { model: 'opus', effort: 'high' };
+  if (filesCount <= 1 && descLen < 100) return { model: 'haiku', effort: 'default' };
+  if (task.priority === 'HIGH' || filesCount >= 3) return { model: 'sonnet', effort: 'high' };
+  return { model: 'sonnet', effort: 'medium' };
+}
+
+// One tier up. Never auto-escalates to fable — pin that by hand (--model fable)
+// on a task that stays blocked.
+function escalateRouting({ model, effort }) {
+  if (model === 'haiku') return { model: 'sonnet', effort: 'high' };
+  if (model === 'sonnet') return { model: 'opus', effort: 'high' };
+  return { model, effort: 'xhigh' };
+}
+
+function isFixTask(task) {
+  return Boolean(task.parent_task_id) && /^Fix:/i.test(task.title || '');
+}
+
+// Stored routing counts as explicit unless it is the old schema's implicit
+// 'sonnet' default (pre-V6 rows never had an effort).
+function hasExplicitRouting(task) {
+  return Boolean(task.model) && !(task.model === 'sonnet' && !task.effort);
+}
+
+async function resolveRouting(task) {
+  if (hasExplicitRouting(task)) return { model: task.model, effort: task.effort || 'default' };
+
+  // Fix tasks were failing review, so never route them below the parent's
+  // tier; on the final attempt go one tier up before the circuit breaker trips.
+  if (isFixTask(task)) {
+    const parent = await getTask(task.parent_task_id);
+    if (parent) {
+      const base = await resolveRouting(parent);
+      return (task.iteration || 1) >= MAX_FIX_ITERATIONS ? escalateRouting(base) : base;
+    }
+  }
+  return inferRouting(task);
+}
+
+function inferModel(task) {
+  return inferRouting(task).model;
 }
 
 function inferReviews(task) {
   const filesCount = (task.files_affected || '').split(',').filter(s => s.trim()).length;
   const descLen = (task.description || '').length;
   const text = ((task.title || '') + ' ' + (task.description || '')).toLowerCase();
-  if (filesCount <= 1 && descLen < 100) return 'none';
+  if (filesCount <= 1 && descLen < 100 && task.priority !== 'CRITICAL') return 'none';
   const dims = ['qa'];
   if (SECURITY_KEYWORDS.some(kw => text.includes(kw))) dims.push('security');
   const isFix = /^(Fix:|Follow-up:)/i.test(task.title) || text.includes('test');
@@ -698,18 +845,25 @@ async function listArtifacts(taskId) {
 // ═══ AUTO-UNBLOCK ═══
 
 async function autoUnblockDependents(completedTaskId) {
-  const allBlocked = await listTasks({ status: 'blocked' });
+  // Scan every open task, not just 'blocked' ones: rows created before V6 could
+  // be 'ready' with a blocked_by list, which getNextTask would skip forever.
+  const allTasks = await listTasks({});
   const unblocked = [];
-  for (const task of allBlocked) {
+  for (const task of allTasks) {
+    if (task.status === 'completed' || task.status === 'in_progress') continue;
     const deps = (task.blocked_by || '').split(',').map(s => parseInt(s.trim())).filter(Boolean);
     if (!deps.includes(completedTaskId)) continue;
     const remaining = deps.filter(d => d !== completedTaskId);
-    if (remaining.length === 0) {
-      await updateTask(task.id, { status: 'ready', blocked_by: null });
-      await addHistory(task.id, 'auto-unblock', null, 'blocked', 'ready');
-      unblocked.push(task.id);
-    } else {
+    if (remaining.length > 0) {
       await updateTask(task.id, { blocked_by: remaining.join(',') });
+    } else if (task.status === 'blocked' && task.fix_required) {
+      // Blocked for another reason too (e.g. failed review 3x) — clear the
+      // dependency but leave it blocked for a human.
+      await updateTask(task.id, { blocked_by: null });
+    } else {
+      await updateTask(task.id, { status: 'ready', blocked_by: null });
+      await addHistory(task.id, 'auto-unblock', null, task.status, 'ready');
+      unblocked.push(task.id);
     }
   }
   return unblocked;
@@ -722,17 +876,19 @@ async function close() {
     db.close();
     db = null;
   }
+  releaseLock();
 }
 
 module.exports = {
-  getDb, saveDb, initializeSchema,
-  addTask, getTask, listTasks, updateTask,
+  getDb, saveDb, initializeSchema, migrateSchema,
+  addTask, getTask, listTasks, updateTask, openDependencies,
   claimTask, releaseTask, completeTask, blockTask, unblockTask,
   addHistory, getHistory,
   startSession, endSession, getActiveSessions, getTasksBySession, assignTaskToSession,
   getStats, getAgentStats, getStaleTasks, getNextTask,
   conflictCheck, suggestBatch, getDependencyTree, exportTasks,
-  inferModel, inferReviews, inferContextFiles,
+  inferModel, inferRouting, escalateRouting, resolveRouting, isFixTask, MAX_FIX_ITERATIONS,
+  inferReviews, inferContextFiles,
   saveArtifact, getArtifact, listArtifacts,
   autoUnblockDependents,
   close
