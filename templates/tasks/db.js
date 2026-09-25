@@ -721,7 +721,7 @@ async function exportTasks(format = 'json') {
 // ═══ AUTO-INFERENCE ═══
 
 const SECURITY_KEYWORDS = '{{SECURITY_KEYWORDS}}'.split(',').map(s => s.trim().toLowerCase());
-const UX_KEYWORDS = ['page', 'component', 'section', 'layout', 'design', 'content', 'navigation', 'ux'];
+const UX_KEYWORDS = ['page', 'component', 'section', 'layout', 'design', 'content', 'navigation', 'ux', 'image', 'gallery', 'hero', 'button', 'responsive', 'mobile'];
 
 // Fix rounds allowed before a task is blocked. The last round escalates.
 const MAX_FIX_ITERATIONS = 3;
@@ -797,7 +797,9 @@ function inferReviews(task) {
   if (filesCount <= 1 && descLen < 100 && task.priority !== 'CRITICAL') return 'none';
   const dims = ['qa'];
   if (SECURITY_KEYWORDS.some(kw => text.includes(kw))) dims.push('security');
-  const isFix = /^(Fix:|Follow-up:)/i.test(task.title) || text.includes('test');
+  // Test-only work is judged by the title alone: good descriptions mention tests
+  // in their acceptance criteria, and a substring match also hit "testimonial".
+  const isFix = /^(Fix:|Follow-up:)/i.test(task.title) || /\btests?\b/i.test(task.title || '');
   const isUserFacing = UX_KEYWORDS.some(kw => text.includes(kw));
   if (!isFix && isUserFacing) dims.push('pm');
   return dims.join(',');

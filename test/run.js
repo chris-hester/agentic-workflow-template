@@ -319,6 +319,15 @@ async function main() {
     assert.deepStrictEqual([r(small).model, r(small).effort], ['opus', 'high']);
     assert.deepStrictEqual([r(maxed).model, r(maxed).effort], ['opus', 'max']);
   });
+  await test('pm review: tests in acceptance criteria or "testimonial" no longer suppress it', () => {
+    const add = args => Number(cli(fresh, ['add', ...args]).match(/#(\d+)/)[1]);
+    const r = id => JSON.parse(cli(fresh, ['route', String(id), '--json'])).reviews;
+    const long = ' Done when the page renders correctly on mobile and the unit tests pass.'.padEnd(120, '.');
+    assert(r(add(['--title', 'Rework gallery grid', '--files', 'a,b', '--description', long])).includes('pm'));
+    assert(r(add(['--title', 'Unify testimonial wording', '--files', 'a,b', '--description', 'Testimonial section copy on the page.'.padEnd(120, '.')])).includes('pm'));
+    assert(!r(add(['--title', 'Unit tests for Header', '--files', 'a,b', '--description', long])).includes('pm'));
+    assert(!r(add(['--title', 'Follow-up: alt text', '--files', 'a,b', '--description', long])).includes('pm'));
+  });
   await test('brief prints a compact status', () => {
     assert(/Task DB: \d+ total/.test(cli(fresh, ['brief'])));
   });
